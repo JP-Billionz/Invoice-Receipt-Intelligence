@@ -1,0 +1,216 @@
+// Prisma schema for Receipt Intelligence AI.
+// Multi-tenant from day one: every domain row indexed by tenantId. Money stored
+// as Decimal(14, 4) for currency precision. See
+// docs/01-PRODUCTIONIZATION-PLAN.md §2.2 for the full rationale.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Auth.js v5 + tenancy
+// ============================================================================
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  currency  String   @default("BBD")
+  settings  Json?
+  users     User[]
+  scans     Scan[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  tenantId      String
+  tenant        Tenant    @relation(fields: [tenantId], references: [id])
+  accounts      Account[]
+  sessions      Session[]
+  scansUploaded Scan[]    @relation("UploadedBy")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([tenantId])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============================================================================
+// Domain — receipts, journal entries, line items, comparisons
+// ============================================================================
+
+enum ScanSource {
+  SINGLE
+  BULK
+  FOLDER_WATCHER
+}
+
+enum ScanStatus {
+  PENDING
+  SCANNING
+  DONE
+  ERROR
+  DUPLICATE_DETECTED
+  EXCLUDED
+}
+
+model Scan {
+  id                String     @id @default(cuid())
+  tenantId          String
+  tenant            Tenant     @relation(fields: [tenantId], references: [id])
+  uploadedById      String
+  uploadedBy        User       @relation("UploadedBy", fields: [uploadedById], references: [id])
+  source            ScanSource
+  status            ScanStatus @default(PENDING)
+  fileName          String
+  mimeType          String
+  // Optional storage URL for the original image. Whether we keep the image
+  // after extraction is a tenant-level setting (Plan §3.7).
+  fileBlobUrl       String?
+
+  // Extracted fields — mirror the prototype's JournalData type
+  vendor            String?
+  transactionDate   DateTime?
+  // Normalized form (alpha-numeric, uppercase) for tenant-scoped dedup
+  documentNumber    String?
+  documentNumberRaw String?
+  vatAmount         Decimal?   @db.Decimal(14, 4)
+  vatRate           String?
+  expenseCategory   String?
+  subtotal          Decimal?   @db.Decimal(14, 4)
+  totalAmount       Decimal?   @db.Decimal(14, 4)
+  isInvoice         Boolean?
+
+  // Cross-session dedup: when a new Scan matches an existing tenant Scan by
+  // normalized documentNumber, this points back to the original.
+  duplicateOfId     String?
+  duplicateOf       Scan?      @relation("Duplicates", fields: [duplicateOfId], references: [id])
+  duplicates        Scan[]     @relation("Duplicates")
+
+  errorMessage      String?
+  processingTimeMs  Int?
+
+  journalEntries    JournalEntry[]
+  lineItems         LineItem[]
+
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, transactionDate])
+  @@index([tenantId, documentNumber])
+  @@index([tenantId, vendor])
+  @@index([duplicateOfId])
+}
+
+model JournalEntry {
+  id          String  @id @default(cuid())
+  scanId      String
+  scan        Scan    @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  // Denormalized for fast tenant-scoped queries (analytics, exports).
+  tenantId    String
+  account     String
+  debit       Decimal @db.Decimal(14, 4)
+  credit      Decimal @db.Decimal(14, 4)
+  description String
+  // Preserve the model's original ordering of the entries.
+  position    Int
+
+  @@index([tenantId])
+  @@index([scanId])
+}
+
+model LineItem {
+  id          String      @id @default(cuid())
+  scanId      String
+  scan        Scan        @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  tenantId    String
+  description String
+  quantity    Decimal     @db.Decimal(14, 4)
+  unitPrice   Decimal     @db.Decimal(14, 4)
+  total       Decimal     @db.Decimal(14, 4)
+  position    Int
+  comparison  Comparison?
+
+  @@index([tenantId])
+  @@index([scanId])
+}
+
+// Price-comparison guardrails are enforced at three layers:
+//   1. App layer (lib/gemini/comparison.ts) — utilities check, locality
+//      filtering, fail-closed on missing source.
+//   2. ORM layer (this model) — comparablePrice is nullable.
+//   3. DB layer — a CHECK constraint added in the next migration enforces
+//      (comparablePrice IS NULL OR sourceUrl IS NOT NULL). The database
+//      itself rejects "price without source" rows.
+model Comparison {
+  id                String   @id @default(cuid())
+  lineItemId        String   @unique
+  lineItem          LineItem @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
+  tenantId          String
+
+  // Null when no valid Barbados-local source was found.
+  comparablePrice   Decimal? @db.Decimal(14, 4)
+  comparableProduct String?
+  comparableVendor  String?
+  // MUST be set whenever comparablePrice is non-null. Enforced by CHECK
+  // constraint at the DB layer and by the comparison handler at the app layer.
+  sourceUrl         String?
+  sourceTitle       String?
+
+  // Always record the attempt, even when the result was blank — so the UI can
+  // distinguish "we looked, found nothing" from "we never tried".
+  searchedAt        DateTime
+  // True for electricity / water line items — we skip the Gemini call entirely
+  // per scope §2.
+  skipped           Boolean  @default(false)
+  skipReason        String?
+
+  @@index([tenantId])
+}

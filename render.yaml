@@ -1,0 +1,51 @@
+# Render Blueprint for Receipt Intelligence AI.
+#
+# All six AISB Render-deploy lessons baked in — see
+# `_Business/Receipt-Intelligence-AI/CLAUDE-CODE-KICKOFF.md` step 8 and the
+# memory file `feedback-render-deploy-lessons`.
+
+services:
+  - type: web
+    name: receipt-intelligence
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+
+    # Lesson #1: Render sets NODE_ENV=production, which strips devDependencies.
+    # `--include=dev` keeps Prisma + TypeScript + Next CLI available for the
+    # build step. Bit the invoicer four times before being fixed permanently.
+    buildCommand: npm install --include=dev && npx prisma generate && npx prisma migrate deploy && npm run build
+
+    startCommand: npm run start
+
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+
+      # Lesson #4: AUTH_TRUST_HOST must be in render.yaml, NOT dashboard-only.
+      # Dashboard env vars aren't applied early enough for Auth.js v5's
+      # host-validation step.
+      - key: AUTH_TRUST_HOST
+        value: "true"
+
+      # Lesson #5: secrets declared with `sync: false`, values set in Render UI.
+      - key: DATABASE_URL
+        sync: false
+      - key: NEXTAUTH_SECRET
+        sync: false
+      - key: NEXTAUTH_URL
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+
+      # Server-side only — NEVER NEXT_PUBLIC_*. See lib/gemini/*.ts.
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # Comma-separated host suffixes for the Barbados locality check in
+      # lib/gemini/comparison.ts. Edit in Render dashboard without a redeploy.
+      - key: BB_RETAILER_ALLOWLIST
+        sync: false
