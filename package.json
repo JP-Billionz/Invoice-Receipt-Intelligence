@@ -10,7 +10,10 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.7.4",
@@ -32,10 +35,12 @@
     "@types/nodemailer": "^6.4.17",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
+    "@vitest/coverage-v8": "^4.1.7",
     "eslint": "^8.57.1",
     "eslint-config-next": "^14.2.21",
     "prisma": "^5.22.0",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.7"
   },
   "engines": {
     "node": ">=20"
