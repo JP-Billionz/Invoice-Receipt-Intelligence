@@ -1,0 +1,5 @@
+{
+  "name": "Image to Journal Entry AI V.1",
+  "description": "An intelligent application that reads receipt images, interprets them, and automatically generates corresponding accounting journal entries, which can be exported to Excel.",
+  "requestFramePermissions": []
+}

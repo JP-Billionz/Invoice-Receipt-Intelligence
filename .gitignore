@@ -1,11 +1,33 @@
-# Minimal guard for the planning branch. The app-shell PR replaces this with
-# the full Next.js .gitignore.
-node_modules/
-.next/
-dist/
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Env (the app-shell PR replaces this file with the full Next.js .gitignore;
+# coverage kept here so secrets don't leak in the window between v0 and step 1)
 .env
 .env.local
 .env.*.local
-*.log
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
 .DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Misc
 .pr-body-tmp.md
