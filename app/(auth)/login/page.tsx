@@ -10,8 +10,8 @@ export const metadata = {
  * Magic-link request page.
  *
  * The form posts to a server action that calls Auth.js v5's `signIn` with the
- * nodemailer provider. NextAuth sends the email via SendGrid SMTP (configured
- * in lib/auth.ts) and redirects to /verify-request.
+ * `http-email` provider — sends via SendGrid's HTTPS API (lib/email/sendgrid.ts)
+ * because Render free tier blocks outbound SMTP.
  */
 export default async function LoginPage() {
   // Already signed in? Skip the form.
@@ -24,7 +24,7 @@ export default async function LoginPage() {
     'use server';
     const email = String(formData.get('email') ?? '').trim().toLowerCase();
     if (!email) return;
-    await signIn('nodemailer', {
+    await signIn('http-email', {
       email,
       redirectTo: '/scan',
     });
