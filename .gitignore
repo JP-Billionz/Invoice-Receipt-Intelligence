@@ -1,0 +1,11 @@
+# Minimal guard for the planning branch. The app-shell PR replaces this with
+# the full Next.js .gitignore.
+node_modules/
+.next/
+dist/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+.pr-body-tmp.md
