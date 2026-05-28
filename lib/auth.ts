@@ -1,9 +1,10 @@
 import NextAuth, { type NextAuthConfig } from 'next-auth';
-import Nodemailer from 'next-auth/providers/nodemailer';
 import { PrismaAdapter } from '@auth/prisma-adapter';
 import type { Adapter, AdapterUser } from 'next-auth/adapters';
+import type { Provider } from 'next-auth/providers';
 
 import { prisma } from '@/lib/db';
+import { sendMagicLinkViaSendGrid } from '@/lib/email/sendgrid';
 
 /**
  * Wrap the default PrismaAdapter so that creating a User also creates a
@@ -54,24 +55,38 @@ function tenantAwarePrismaAdapter(): Adapter {
   };
 }
 
+/**
+ * Custom email provider using SendGrid's HTTPS API.
+ *
+ * Replaces the default Nodemailer SMTP provider because Render's free tier
+ * blocks outbound SMTP — Nodemailer hangs ~3 min then `Error: Connection
+ * timeout`. HTTPS to api.sendgrid.com works fine.
+ *
+ * See `feedback-render-deploy-lessons` memory file (lesson #7).
+ * Sending logic lives in `lib/email/sendgrid.ts` — pure / testable.
+ */
+const httpEmailProvider: Provider = {
+  id: 'http-email',
+  name: 'Email',
+  type: 'email',
+  // `from` is unused at runtime (sendVerificationRequest reads EMAIL_FROM
+  // directly from env) but Auth.js asserts the field is set, so mirror it.
+  from: process.env.EMAIL_FROM,
+  maxAge: 24 * 60 * 60, // 24h, matches old Nodemailer default
+  // `server` MUST be present because the EmailConfig type requires it, even
+  // though our sendVerificationRequest never reads it. Set to a sentinel so
+  // any code path that does try to use it fails loudly rather than silently.
+  server: 'http+sendgrid://unused',
+  options: {},
+  async sendVerificationRequest({ identifier, url }) {
+    const host = new URL(url).host;
+    await sendMagicLinkViaSendGrid({ to: identifier, url, host });
+  },
+};
+
 const config: NextAuthConfig = {
   adapter: tenantAwarePrismaAdapter(),
-  providers: [
-    Nodemailer({
-      server: {
-        host: 'smtp.sendgrid.net',
-        port: 587,
-        auth: {
-          // SendGrid SMTP: literal string "apikey" as the username, API key as
-          // the password. Documented at:
-          //   https://www.twilio.com/docs/sendgrid/for-developers/sending-email/getting-started-smtp
-          user: 'apikey',
-          pass: process.env.SENDGRID_API_KEY!,
-        },
-      },
-      from: process.env.EMAIL_FROM!,
-    }),
-  ],
+  providers: [httpEmailProvider],
   session: {
     // Required when using an email provider with a database adapter.
     strategy: 'database',
