@@ -96,6 +96,14 @@ export const ScannerClient: React.FC<ScannerClientProps> = ({
   });
   const [showDuplicateReport, setShowDuplicateReport] = useState(true);
 
+  // Hotfix 2026-05-30 — bulk + folder-watcher uploads must serialize so the
+  // server-side semaphore (cap 2) isn't slammed by N parallel POSTs that
+  // each hold ~MB of bytes. `terminalResolvers` is keyed by `localId`;
+  // a queue-watcher effect (below) calls + deletes the resolver the moment
+  // the item's scan reaches terminal status. The serial uploader awaits
+  // the resolver between consecutive POSTs.
+  const terminalResolvers = useRef<Map<LocalId, () => void>>(new Map());
+
   // Persist ignoreVat to localStorage like the prototype.
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -145,62 +153,104 @@ export const ScannerClient: React.FC<ScannerClientProps> = ({
         setSelectedLocalId(newItems[0].localId);
       }
 
-      // Fire uploads in parallel. The per-tenant rate limit will 429 a hot
-      // tenant — we surface it on the item without blocking the queue.
-      await Promise.all(
-        newItems.map(async (item, idx) => {
-          const file = files[idx];
-          try {
-            const form = new FormData();
-            form.append('file', file);
-            form.append(
-              'source',
-              targetMode === 'bulk' ? 'BULK' : 'SINGLE',
-            );
-            const res = await fetch('/api/scan', {
-              method: 'POST',
-              body: form,
-            });
-            if (!res.ok) {
-              const text = await res.text();
-              throw new Error(
-                res.status === 429
-                  ? 'Rate-limited by your workspace bucket. Retry shortly.'
-                  : text || `Upload failed (${res.status})`,
-              );
-            }
-            const body = (await res.json()) as {
-              scanId: string;
-              status: ScanResponse['status'];
-            };
-            setQueue((prev) =>
-              prev.map((q) =>
-                q.localId === item.localId
-                  ? {
-                      ...q,
-                      scanId: body.scanId,
-                      uploadState: 'submitted',
-                      scan: undefined,
-                      comparisonState: 'idle',
-                    }
-                  : q,
-              ),
-            );
-          } catch (err: unknown) {
-            const message =
-              err instanceof Error ? err.message : 'Upload failed.';
-            setQueue((prev) =>
-              prev.map((q) =>
-                q.localId === item.localId
-                  ? { ...q, uploadState: 'failed', uploadError: message }
-                  : q,
-              ),
+      // Per-item upload — POST /api/scan, then update queue with scanId.
+      const uploadOne = async (
+        item: QueueItem,
+        file: File,
+      ): Promise<void> => {
+        try {
+          const form = new FormData();
+          form.append('file', file);
+          form.append('source', targetMode === 'bulk' ? 'BULK' : 'SINGLE');
+          const res = await fetch('/api/scan', {
+            method: 'POST',
+            body: form,
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(
+              res.status === 429
+                ? 'Rate-limited by your workspace bucket. Retry shortly.'
+                : text || `Upload failed (${res.status})`,
             );
           }
-        }),
-      );
+          const body = (await res.json()) as {
+            scanId: string;
+            status: ScanResponse['status'];
+          };
+          setQueue((prev) =>
+            prev.map((q) =>
+              q.localId === item.localId
+                ? {
+                    ...q,
+                    scanId: body.scanId,
+                    uploadState: 'submitted',
+                    scan: undefined,
+                    comparisonState: 'idle',
+                  }
+                : q,
+            ),
+          );
+        } catch (err: unknown) {
+          const message =
+            err instanceof Error ? err.message : 'Upload failed.';
+          setQueue((prev) =>
+            prev.map((q) =>
+              q.localId === item.localId
+                ? { ...q, uploadState: 'failed', uploadError: message }
+                : q,
+            ),
+          );
+        }
+      };
+
+      if (targetMode === 'single') {
+        // Single mode → only one file in this batch. Parallel is fine.
+        await Promise.all(
+          newItems.map((item, idx) => uploadOne(item, files[idx])),
+        );
+      } else {
+        // Bulk + folder-watcher → SERIALIZE. Hotfix 2026-05-30: parallel
+        // POSTs caused N simultaneous unawaited runExtractJobs (each
+        // holding ~MB of bytes + Gemini state) → OOM on Render free 512 MB.
+        // The server-side semaphore caps it too, but client-side serialization
+        // also avoids the "queue 10 things at once" UX confusion and gives
+        // V8 a clear gap to GC between iterations.
+        for (let i = 0; i < newItems.length; i++) {
+          const item = newItems[i];
+          await uploadOne(item, files[i]);
+          // Wait for THIS scan to reach terminal status before POSTing the
+          // next file. If the upload failed (no scanId set) we skip the
+          // wait — failed items are already in a terminal state for the UI.
+          const queued = queueRef.current.find(
+            (q) => q.localId === item.localId,
+          );
+          if (queued?.scanId && queued.uploadState !== 'failed') {
+            await waitForTerminal(item.localId);
+          }
+        }
+      }
     },
     [mode, selectedLocalId],
+  );
+
+  /**
+   * Resolves once the queue item with this localId reaches a terminal
+   * scan status. The queue-watcher useEffect below detects the transition
+   * and fires the resolver. If already terminal at call time, resolves
+   * synchronously.
+   */
+  const waitForTerminal = useCallback(
+    (localId: LocalId): Promise<void> => {
+      const current = queueRef.current.find((q) => q.localId === localId);
+      if (current?.scan && isTerminal(current.scan.status)) {
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        terminalResolvers.current.set(localId, resolve);
+      });
+    },
+    [],
   );
 
   // -----------------------------------------------------------------------
@@ -259,6 +309,32 @@ export const ScannerClient: React.FC<ScannerClientProps> = ({
     const id = setInterval(tick, POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [pendingCount]);
+
+  // -----------------------------------------------------------------------
+  // Queue-watcher: when an item reaches terminal status, fire its pending
+  // `waitForTerminal` resolver (if any). This is what unblocks the serial
+  // bulk/folder-watcher uploader between iterations (hotfix 2026-05-30).
+  // -----------------------------------------------------------------------
+  useEffect(() => {
+    for (const q of queue) {
+      if (q.scan && isTerminal(q.scan.status)) {
+        const resolver = terminalResolvers.current.get(q.localId);
+        if (resolver) {
+          terminalResolvers.current.delete(q.localId);
+          resolver();
+        }
+      }
+      // An upload failure is also "terminal" for serialization purposes —
+      // we should advance to the next file rather than waiting forever.
+      if (q.uploadState === 'failed') {
+        const resolver = terminalResolvers.current.get(q.localId);
+        if (resolver) {
+          terminalResolvers.current.delete(q.localId);
+          resolver();
+        }
+      }
+    }
+  }, [queue]);
 
   // -----------------------------------------------------------------------
   // Auto-fire comparison once the SELECTED single-mode scan transitions to

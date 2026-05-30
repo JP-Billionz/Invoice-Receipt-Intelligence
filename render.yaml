@@ -58,3 +58,11 @@ services:
         value: "60"
       - key: GEMINI_RATE_LIMIT_BURST
         value: "10"
+
+      # Hotfix 2026-05-30 — process-wide concurrent extraction cap. Each
+      # in-flight runExtractJob peaks around 80-120 MB (image bytes +
+      # Gemini SDK state); 2 fits under Render free's 512 MB alongside
+      # Next + Prisma. Bumping past 2 on free tier risks OOM (see PR #13).
+      # Increase when AISB graduates to the Render Starter tier (1 GB).
+      - key: EXTRACTION_CONCURRENCY
+        value: "2"

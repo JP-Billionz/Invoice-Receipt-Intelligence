@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 
+import { extractionSemaphore } from '@/lib/concurrency/extraction-semaphore';
 import { prisma } from '@/lib/db';
 import { extractReceipt } from '@/lib/gemini/extract';
 import { normalizeDocumentNumber } from './normalize';
@@ -33,7 +34,20 @@ export interface ExtractJobInput {
 }
 
 export async function runExtractJob(input: ExtractJobInput): Promise<void> {
-  const { scanId, tenantId, base64, mimeType, startedAt } = input;
+  const { scanId, tenantId, mimeType, startedAt } = input;
+
+  // Hold the base64 bytes in a LOCAL `let` so we can drop the reference
+  // before persistence (hotfix 2026-05-30 — Render free 512 MB OOM on the
+  // bulk/folder-watcher flow). Also nullify the input object's slot so the
+  // POST handler's unawaited-Promise closure can release its reference
+  // while we're still inside the persistence transaction.
+  let base64: string | null = input.base64;
+  (input as { base64: unknown }).base64 = null;
+
+  // Cap process-wide concurrent extractions (EXTRACTION_CONCURRENCY,
+  // default 2). While queued the Scan stays at PENDING so the UI shows
+  // "Queued for extraction…" until our turn.
+  const releaseSemaphore = await extractionSemaphore.acquire();
 
   try {
     await prisma.scan.update({
@@ -41,7 +55,11 @@ export async function runExtractJob(input: ExtractJobInput): Promise<void> {
       data: { status: 'SCANNING' },
     });
 
-    const extracted = await extractReceipt({ base64, mimeType });
+    const extracted = await extractReceipt({ base64: base64!, mimeType });
+    // Drop the bytes BEFORE the persistence transaction — V8 can reclaim
+    // ~MB of base64 string while we wait on Postgres + before the next
+    // job in the semaphore queue picks up its own bytes.
+    base64 = null;
 
     const documentNumberRaw =
       extracted.documentNumber && extracted.documentNumber !== 'N/A'
@@ -122,6 +140,10 @@ export async function runExtractJob(input: ExtractJobInput): Promise<void> {
     const message =
       error instanceof Error ? error.message : 'Unknown extraction error.';
 
+    // Free the bytes on the error path too — extract may have thrown
+    // before we had a chance to null them above.
+    base64 = null;
+
     // Best-effort: mark the scan as errored so the UI can surface the message.
     // Swallow any error in THIS update — we don't want a DB blip to cause an
     // unhandled rejection that crashes the process.
@@ -140,6 +162,8 @@ export async function runExtractJob(input: ExtractJobInput): Promise<void> {
           updateError,
         );
       });
+  } finally {
+    releaseSemaphore();
   }
 }
 
