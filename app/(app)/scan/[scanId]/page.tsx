@@ -6,6 +6,7 @@ import { currentTenant } from '@/lib/tenant';
 import { serializeScan } from '@/lib/scan/serialize';
 import { JournalEntryTable } from '@/components/scanner/JournalEntryTable';
 import { LineItemTable } from '@/components/scanner/LineItemTable';
+import { ScanDetailDownloadButton } from '@/components/scanner/ScanDetailDownloadButton';
 
 export const dynamic = 'force-dynamic';
 
@@ -85,7 +86,7 @@ export default async function ScanDetailPage({ params, searchParams }: PageProps
             data={data}
             tenantCurrency={tenant.currency}
             ignoreVat={ignoreVat}
-            excelHref={`/api/scan/${data.id}/excel?ignoreVat=${ignoreVat}`}
+            onDownloadExcel={null}
           />
           {data.lineItems.length > 0 && (
             <LineItemTable
@@ -93,6 +94,7 @@ export default async function ScanDetailPage({ params, searchParams }: PageProps
               currency={data.currency ?? tenant.currency}
             />
           )}
+          <ScanDetailDownloadButton scanId={data.id} ignoreVat={ignoreVat} />
         </main>
       </div>
     </div>

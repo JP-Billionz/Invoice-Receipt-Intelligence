@@ -10,8 +10,17 @@ interface JournalEntryTableProps {
   /** Tenant currency fallback when scan.currency is null (Plan §4.6). */
   tenantCurrency: string;
   ignoreVat: boolean;
-  /** Direct download URL — anchor-based, no JS required. Pass null to hide. */
-  excelHref: string | null;
+  /**
+   * EXPLICIT user action. Pass null to hide the Download button entirely.
+   *
+   * REGRESSION-PROOFED: this is a callback, not a URL. A previous
+   * implementation rendered `<a href={excelHref}>` which — combined with
+   * the orchestrator's polling-driven re-renders — caused a runaway
+   * export firing on every poll tick (hotfix on 2026-05-29). The button
+   * here can ONLY fire via a user click; there is no codepath that
+   * invokes the export from a useEffect.
+   */
+  onDownloadExcel?: (() => void) | null;
   isExportDisabled?: boolean;
 }
 
@@ -28,7 +37,7 @@ export const JournalEntryTable: React.FC<JournalEntryTableProps> = ({
   data,
   tenantCurrency,
   ignoreVat,
-  excelHref,
+  onDownloadExcel,
   isExportDisabled,
 }) => {
   const currency = data.currency ?? tenantCurrency;
@@ -179,13 +188,14 @@ export const JournalEntryTable: React.FC<JournalEntryTableProps> = ({
         )}
       </div>
 
-      {excelHref && (
-        <a
-          href={excelHref}
-          aria-disabled={isExportDisabled}
+      {onDownloadExcel && (
+        <button
+          type="button"
+          onClick={onDownloadExcel}
+          disabled={isExportDisabled}
           className={`w-full font-black py-6 px-8 rounded-3xl transition-all flex items-center justify-center text-xl shadow-2xl active:scale-[0.99] group mt-8 ${
             isExportDisabled
-              ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none border-2 border-dashed border-slate-300 pointer-events-none'
+              ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none border-2 border-dashed border-slate-300'
               : 'bg-aisb-green text-aisb-bg hover:bg-aisb-green-deep shadow-aisb-green/20'
           }`}
         >
@@ -202,7 +212,7 @@ export const JournalEntryTable: React.FC<JournalEntryTableProps> = ({
               <span>Download Professional Analysis (Excel + CSV)</span>
             </>
           )}
-        </a>
+        </button>
       )}
     </div>
   );
