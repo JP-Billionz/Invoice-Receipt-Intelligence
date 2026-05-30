@@ -1,12 +1,19 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import { ServiceWorkerRegistration } from '@/components/pwa/ServiceWorkerRegistration';
 
 export const metadata: Metadata = {
   title: 'Receipt Intelligence AI',
   description:
     'Scan receipts and invoices into balanced IFRS/GAAP journal entries with Barbados-local price comparisons.',
-  // PWA manifest will be wired up in a later PR (Plan §2.4).
   applicationName: 'Receipt Intelligence AI',
+  // PWA + iOS install hints. The web manifest itself lives at
+  // `app/manifest.ts` and is auto-injected by Next 14's metadata system.
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'black-translucent',
+    title: 'Receipts AI',
+  },
 };
 
 export const viewport: Viewport = {
@@ -40,7 +47,10 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body>{children}</body>
+      <body>
+        {children}
+        <ServiceWorkerRegistration />
+      </body>
     </html>
   );
 }
