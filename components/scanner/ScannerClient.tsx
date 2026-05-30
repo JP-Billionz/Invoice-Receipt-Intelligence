@@ -17,6 +17,7 @@ import { LineItemTable } from './LineItemTable';
 import { PriceComparisonTable, type ComparisonRow } from './PriceComparisonTable';
 import { QueueList, type QueueEntry } from './QueueList';
 
+import { makeFireOnceTracker } from '@/lib/scanner/fire-once-tracker';
 import type { ScanResponse } from '@/lib/scan/serialize';
 
 interface ScannerClientProps {
@@ -203,15 +204,33 @@ export const ScannerClient: React.FC<ScannerClientProps> = ({
   );
 
   // -----------------------------------------------------------------------
-  // Polling — single setInterval that refreshes any submitted-but-not-
-  // terminal scan every POLL_INTERVAL_MS.
+  // Polling — interval starts/stops based on whether any scan is still
+  // non-terminal. When the queue is empty or every scan is terminal, the
+  // interval is cleared (no wasted fetches, no surface for runaway bugs).
+  //
+  // Re-armed automatically the next time `pendingCount` flips above zero
+  // (e.g. user uploads another file).
   // -----------------------------------------------------------------------
   const queueRef = useRef(queue);
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
 
+  const pendingCount = useMemo(
+    () =>
+      queue.reduce(
+        (n, q) =>
+          q.scanId && (q.scan == null || !isTerminal(q.scan.status))
+            ? n + 1
+            : n,
+        0,
+      ),
+    [queue],
+  );
+
   useEffect(() => {
+    if (pendingCount === 0) return; // No interval armed.
+
     const tick = async () => {
       const itemsToPoll = queueRef.current.filter(
         (q) =>
@@ -239,7 +258,7 @@ export const ScannerClient: React.FC<ScannerClientProps> = ({
     };
     const id = setInterval(tick, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [pendingCount]);
 
   // -----------------------------------------------------------------------
   // Auto-fire comparison once the SELECTED single-mode scan transitions to
@@ -250,11 +269,19 @@ export const ScannerClient: React.FC<ScannerClientProps> = ({
     [queue, selectedLocalId],
   );
 
+  // Fire-once tracker — guarantees the comparison POST is sent at most
+  // ONCE per scanId, regardless of how many times the effect below re-runs
+  // due to `selectedItem` reference churn from polling. Hotfix 2026-05-29:
+  // without this, a stale-closure / state-batching race could let the
+  // effect re-fire on every poll tick. See `lib/scanner/fire-once-tracker.ts`.
+  const comparisonFireTracker = useRef(makeFireOnceTracker());
+
   useEffect(() => {
     if (mode !== 'single') return;
     if (!selectedItem?.scanId || !selectedItem.scan) return;
     if (selectedItem.scan.status !== 'DONE') return;
-    if (selectedItem.comparisonState !== 'idle') return;
+    // Cross-render guard: if we've ever fired for this scanId, never again.
+    if (!comparisonFireTracker.current.tryFire(selectedItem.scanId)) return;
 
     const scanId = selectedItem.scanId;
     const localId = selectedItem.localId;
@@ -329,13 +356,22 @@ export const ScannerClient: React.FC<ScannerClientProps> = ({
   const hasPendingDuplicates = duplicateGroups.length > 0;
 
   // -----------------------------------------------------------------------
-  // Excel hrefs
+  // Excel — STRICTLY USER ACTION. Hotfix 2026-05-29: previous version
+  // rendered `<a href={url}>` and (combined with polling re-renders) caused
+  // a runaway export firing on every poll tick. Now: an explicit callback
+  // passed to JournalEntryTable's button. No useEffect, no anchor, no
+  // automatic invocation. The callback below is the ONLY codepath that
+  // hits `/api/scan/[id]/excel`.
   // -----------------------------------------------------------------------
-  const singleExcelHref = useMemo(() => {
-    if (!selectedItem?.scanId || selectedItem.scan?.status !== 'DONE')
-      return null;
-    return `/api/scan/${selectedItem.scanId}/excel?ignoreVat=${ignoreVat}`;
+  const handleSingleExcelDownload = useCallback(() => {
+    if (!selectedItem?.scanId || selectedItem.scan?.status !== 'DONE') return;
+    // window.location lets the server's Content-Disposition: attachment
+    // header trigger the download without navigating away from the SPA.
+    window.location.href = `/api/scan/${selectedItem.scanId}/excel?ignoreVat=${ignoreVat}`;
   }, [selectedItem, ignoreVat]);
+
+  const canDownloadSingleExcel =
+    selectedItem?.scanId != null && selectedItem.scan?.status === 'DONE';
 
   const exportableScanIds = useMemo(
     () =>
@@ -684,7 +720,11 @@ export const ScannerClient: React.FC<ScannerClientProps> = ({
                               data={selectedItem.scan}
                               tenantCurrency={tenantCurrency}
                               ignoreVat={ignoreVat}
-                              excelHref={singleExcelHref}
+                              onDownloadExcel={
+                                canDownloadSingleExcel
+                                  ? handleSingleExcelDownload
+                                  : null
+                              }
                             />
                             {selectedItem.scan.lineItems.length > 0 && (
                               <LineItemTable
